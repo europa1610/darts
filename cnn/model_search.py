@@ -19,7 +19,7 @@ class MixedOp(nn.Module):
       self._ops.append(op)
 
   def forward(self, x, weights):
-    return sum(w * op(x) for w, op in zip(weights, self._ops))
+    return sum(w * op(x) for w, op in zip(weights, self._ops)) #zip returns something like ((w0, op0),(w1, op1), (w2, op2),...)
 
 
 class Cell(nn.Module):
@@ -29,22 +29,23 @@ class Cell(nn.Module):
     self.reduction = reduction
 
     if reduction_prev:
-      self.preprocess0 = FactorizedReduce(C_prev_prev, C, affine=False)
+      self.preprocess0 = FactorizedReduce(C_prev_prev, C, affine=False) #If previous cell was reduction, call factorized reduce to reduce num_channels from C_prev_prev to C and H and W to H/2 and W/2
     else:
       self.preprocess0 = ReLUConvBN(C_prev_prev, C, 1, 1, 0, affine=False)
-    self.preprocess1 = ReLUConvBN(C_prev, C, 1, 1, 0, affine=False)
+    self.preprocess1 = ReLUConvBN(C_prev, C, 1, 1, 0, affine=False) #for the first iteration, both C_prev_prev and C_prev are 64 and C_curr is 16
+    #C_prev_prev, C_prev, C for the 8 layers are as [(64, 64, 16), (64, 64, 16), (64, 128, 32), (128, 128, 32), (128, 128, 32), (128, 256, 64), (256, 256, 64), (256, 256, 64)]
     self._steps = steps
-    self._multiplier = multiplier
+    self._multiplier = multiplier #multiplier = 4 hardcoded
 
     self._ops = nn.ModuleList()
     self._bns = nn.ModuleList()
-    for i in range(self._steps):
+    for i in range(self._steps): #step = 4 hardcoded
       for j in range(2+i):
         stride = 2 if reduction and j < 2 else 1
         op = MixedOp(C, stride)
         self._ops.append(op)
 
-  def forward(self, s0, s1, weights):
+  def forward(self, s0, s1, weights): #Forward pass on a single cell, takes last two states and arch_weights as inputs and generates the state of the current cell as output
     s0 = self.preprocess0(s0)
     s1 = self.preprocess1(s1)
 
@@ -55,7 +56,7 @@ class Cell(nn.Module):
       offset += len(states)
       states.append(s)
 
-    return torch.cat(states[-self._multiplier:], dim=1)
+    return torch.cat(states[-self._multiplier:], dim=1) #concatenate last 4 states across channel dimension
 
 
 class Network(nn.Module):
@@ -94,6 +95,7 @@ class Network(nn.Module):
 
     self._initialize_alphas()
 
+
   def new(self):
     model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda()
     for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
@@ -107,7 +109,7 @@ class Network(nn.Module):
         weights = F.softmax(self.alphas_reduce, dim=-1)
       else:
         weights = F.softmax(self.alphas_normal, dim=-1)
-      s0, s1 = s1, cell(s0, s1, weights)
+      s0, s1 = s1, cell(s0, s1, weights) #Computes the output state of this cell
     out = self.global_pooling(s1)
     logits = self.classifier(out.view(out.size(0),-1))
     return logits
@@ -139,14 +141,14 @@ class Network(nn.Module):
       for i in range(self._steps):
         end = start + n
         W = weights[start:end].copy()
-        edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x])) if k != PRIMITIVES.index('none')))[:2]
+        edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x])) if k != PRIMITIVES.index('none')))[:2] #sorted(iterable, key=fn) where fn is the basis for sorting. #Pick 2 of the edges with the max arch weight sorted descending by weight
         for j in edges:
           k_best = None
           for k in range(len(W[j])):
             if k != PRIMITIVES.index('none'):
-              if k_best is None or W[j][k] > W[j][k_best]:
+              if k_best is None or W[j][k] > W[j][k_best]:  #What the fuck is this stupid motherfucker doing holy fuck. This could be easily done using using a simple argmax operation
                 k_best = k
-          gene.append((PRIMITIVES[k_best], j))
+          gene.append((PRIMITIVES[k_best], j)) #pick one top primitive from each of two top edges
         start = end
         n += 1
       return gene

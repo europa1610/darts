@@ -12,11 +12,15 @@ import torch.utils
 import torch.nn.functional as F
 import torchvision.datasets as dset
 import torch.backends.cudnn as cudnn
+import wandb
 
 from torch.autograd import Variable
 from model_search import Network
 from architect import Architect
 
+USE_WANDB = True
+if USE_WANDB:
+    wandb.init(project='darts-baseline', name='run0')
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
@@ -25,7 +29,7 @@ parser.add_argument('--learning_rate', type=float, default=0.025, help='init lea
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight decay')
-parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
+parser.add_argument('--report_freq', type=float, default=1, help='report frequency')
 parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
 parser.add_argument('--epochs', type=int, default=50, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=16, help='num of init channels')
@@ -75,9 +79,16 @@ def main():
   criterion = criterion.cuda()
   model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion)
   model = model.cuda()
-  logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
+  param_size = utils.count_parameters_in_MB(model)
+  logging.info("param size = %fMB", param_size)
 
-  optimizer = torch.optim.SGD(
+  if USE_WANDB:
+    table = wandb.Table(columns=["Parameter", "Size"])
+    for param in model.state_dict():
+        table.add_data(param, model.state_dict()[param].size())
+    wandb.log({'Model Param Sizes': table})
+
+  optimizer = torch.optim.SGD( #Opt for weights
       model.parameters(),
       args.learning_rate,
       momentum=args.momentum,
@@ -93,25 +104,51 @@ def main():
   train_queue = torch.utils.data.DataLoader(
       train_data, batch_size=args.batch_size,
       sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-      pin_memory=True, num_workers=2)
+      pin_memory=True, num_workers=0)
 
   valid_queue = torch.utils.data.DataLoader(
       train_data, batch_size=args.batch_size,
       sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-      pin_memory=True, num_workers=2)
+      pin_memory=True, num_workers=0)
 
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+  
+  if USE_WANDB:
+    wandb.config.gpu_dev_id = args.gpu
+    wandb.config.batch_size = args.batch_size
+    wandb.config.lr_init = args.learning_rate
+    wandb.config.lr_min = args.learning_rate_min
+    wandb.config.momentum = args.momentum
+    wandb.config.weight_decay = args.weight_decay
+    wandb.config.report_freq = args.report_freq
+    wandb.config.num_epochs = args.epochs
+    wandb.config.init_channels = args.init_channels
+    wandb.config.num_layers = args.layers
+    wandb.config.seed = args.seed
+    wandb.config.grad_clip = args.grad_clip
+    wandb.config.train_portion = args.train_portion
+    wandb.config.unrolled = args.unrolled
+    wandb.config.arch_lr = args.arch_learning_rate
+    wandb.config.arch_weight_decay = args.arch_weight_decay
+    wandb.config.net_train_size = num_train 
+    wandb.config.param_size_mb = param_size
 
   architect = Architect(model, args)
 
+  table = wandb.Table(columns=['Epoch','Genotype'])
   for epoch in range(args.epochs):
     scheduler.step()
     lr = scheduler.get_lr()[0]
     logging.info('epoch %d lr %e', epoch, lr)
+    if USE_WANDB:
+        wandb.log({'Learning Rate': lr}, step = epoch+1)
 
     genotype = model.genotype()
     logging.info('genotype = %s', genotype)
+    if USE_WANDB:
+        table.add_data(epoch, genotype)
+        wandb.log({'Genotypes Evolution': table}, step=epoch+1)
 
     print(F.softmax(model.alphas_normal, dim=-1))
     print(F.softmax(model.alphas_reduce, dim=-1))
@@ -119,12 +156,18 @@ def main():
     # training
     train_acc, train_obj = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
     logging.info('train_acc %f', train_acc)
+    if USE_WANDB:
+        wandb.log({'Train Acc': train_acc}, step=epoch+1)
 
     # validation
     valid_acc, valid_obj = infer(valid_queue, model, criterion)
     logging.info('valid_acc %f', valid_acc)
+    if USE_WANDB:
+        wandb.log({'Valid Acc': valid_acc}, step=epoch+1)
 
     utils.save(model, os.path.join(args.save, 'weights.pt'))
+    if USE_WANDB:
+        wandb.save('weights.pt')
 
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
